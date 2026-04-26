@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hdf5-container"
+version = "0.0.1"
+authors = [
+  { name = "Ryuto Yoshida" },
+]
+description = "Hierarchical HDF5 container with simple store/access APIs and periodic flushing."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "h5py",
+    "numpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/ry-yoshida-private/HDF5Container"
+"Bug Tracker" = "https://github.com/ry-yoshida-private/HDF5Container/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hdf5_container = ["py.typed"]

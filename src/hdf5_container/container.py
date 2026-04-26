@@ -1,0 +1,302 @@
+from __future__ import annotations
+import logging
+import h5py
+import numpy as np
+from typing import Any, Iterator
+from dataclasses import dataclass, field
+
+from .mixin import IOMixin, SpecialMethodsMixin
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FlushCounter:
+    """Shared mutable counter for periodic flushing across subcontainers."""
+
+    value: int = 0
+
+    def increment(self) -> int:
+        """Increment the counter and return the updated value."""
+        self.value += 1
+        return self.value
+
+    def is_flush_timing(self, flush_interval: int) -> bool:
+        """Return whether current counter reached the flush boundary."""
+        return self.value % flush_interval == 0
+
+
+@dataclass
+class HDF5Container(IOMixin, SpecialMethodsMixin):
+    """Container for HDF5 operations with automatic flushing.
+    
+    This class provides a convenient interface for storing and retrieving data
+    from HDF5 files with hierarchical group structure support.
+    
+    Parameters
+    ----------
+    data : h5py.File | h5py.Group
+        The HDF5 file or group to operate on.
+    flush_interval : int, optional
+        Number of operations before automatic flush, by default 100.
+    """
+    data: h5py.File | h5py.Group
+    flush_interval: int = 100
+    counter: FlushCounter = field(default_factory=FlushCounter)
+
+    def __post_init__(self) -> None:
+        """Validate constructor arguments after dataclass initialization."""
+        if self.flush_interval <= 0:
+            raise ValueError("flush_interval must be greater than 0.")
+
+    def store(
+        self, 
+        keys: list[str], 
+        name: str, 
+        data: Any,
+        is_dtype_change_enabled: bool = False
+        ) -> None:
+        """Store a value in the HDF5 file at the specified location.
+        
+        Parameters
+        ----------
+        keys : list[str]
+            List of group keys to navigate to the target subgroup.
+        name : str
+            Name of the dataset to store.
+        data : Any
+            Data to store in the dataset.
+        is_dtype_change_enabled : bool, optional
+            Whether to allow dtype changes when overwriting, by default False.
+        """
+        subgroup = self.access_subgroup(keys=keys)
+        subgroup.set_data(
+            name=name, 
+            data=data,
+            is_dtype_change_enabled=is_dtype_change_enabled
+            )
+        subgroup.process_flush()
+
+    def set_data(
+        self, 
+        name: str, 
+        data: Any,
+        is_dtype_change_enabled: bool = False
+        ) -> None:
+        """Set data in the specified HDF5 group.
+        
+        Parameters
+        ----------
+        name : str
+            Name of the dataset.
+        data : Any
+            Data to store.
+        is_dtype_change_enabled : bool, optional
+            Whether to allow dtype changes when overwriting, by default False.
+        """
+        if type(data) != np.ndarray:
+            data = np.array(data)
+
+        if np.issubdtype(data.dtype, np.str_):
+            data = data.astype('S')
+
+        if name not in self.data.keys():
+            self.data.create_dataset(
+            name=name, 
+            dtype=data.dtype,
+            data=data
+            )
+            return
+
+        self._replace_data(
+            data=data,
+            name=name,
+            is_dtype_change_enabled=is_dtype_change_enabled
+            )
+
+    def _replace_data(
+        self,
+        data: np.ndarray,
+        name: str,
+        is_dtype_change_enabled: bool = False
+        ) -> None:
+        """Replace an existing dataset value in the current group.
+        
+        Parameters
+        ----------
+        data : np.ndarray
+            Data to store.
+        name : str
+            Name of the dataset.
+        is_dtype_change_enabled : bool, optional
+            Whether to allow dtype changes when overwriting, by default False.
+
+        Raises
+        ------
+        ValueError
+            If the target key does not resolve to a dataset.
+        TypeError
+            If dtype differs and dtype change is not enabled.
+        """
+        past_data = self.data[name]
+        if not isinstance(past_data, h5py.Dataset):
+            raise ValueError(f"Dataset {name} is not a dataset.")
+        past_value = np.array(past_data[()])
+
+        is_same_type = data.dtype == past_value.dtype
+        is_same_shape = data.shape == past_value.shape
+
+        if is_same_type and is_same_shape:
+            past_data[()] = data
+            return
+ 
+        if not is_dtype_change_enabled and not is_same_type:
+            logger.debug("dtype mismatch in group %s", self.data)
+            raise TypeError(
+                f"Cannot overwrite data with different dtype.\n"
+                f"Existing: {past_value.dtype}, New: {data.dtype}"
+            )
+
+        del self.data[name]
+        self.data.create_dataset(
+            name=name, 
+            dtype=data.dtype,
+            data=data
+            )
+        
+    def access_value(
+        self, 
+        keys: list[str], 
+        name: str
+        ) -> Any:
+        """Retrieve a value from the HDF5 file at the specified location.
+        
+        Parameters
+        ----------
+        keys : list[str]
+            List of group keys to navigate to the target subgroup.
+        name : str
+            Name of the dataset to retrieve.
+        
+        Returns
+        -------
+        Any
+            The value stored in the dataset, or None if not found.
+        """
+        subgroup = self.access_subgroup(keys=keys)
+        return subgroup.get(name=name)
+
+    def access_subgroup(
+        self, 
+        keys: list[str]
+        ) -> HDF5Container:
+        """Access or create a subgroup using the provided key path.
+        
+        Parameters
+        ----------
+        keys : list[str]
+            List of group keys to navigate/create the subgroup.
+        
+        Returns
+        -------
+        HDF5Container
+            The HDF5Container object containing the target subgroup.
+        """
+        subgroup = self.data
+        for key in keys:            
+            subgroup = subgroup.require_group(key) 
+        return self.__class__(
+            data=subgroup, 
+            flush_interval=self.flush_interval, 
+            counter=self.counter
+            )
+
+    def get(
+        self, 
+        name: str
+        ) -> Any:
+        """Retrieve a value from the specified HDF5 group.
+        
+        Parameters
+        ----------
+        name : str
+            Name of the dataset.
+        
+        Returns
+        -------
+        Any
+            The dataset value if found, None otherwise.
+        """
+        value = self.data.get(name, None)
+        if isinstance(value, h5py.Dataset):
+            output: Any = value[()]
+            if isinstance(output, bytes):
+                output = output.decode('utf-8')
+            return output
+        return value
+
+    def process_flush(self) -> None:
+        """Flush periodically based on operation count.
+        
+        This increments the write counter and flushes when the configured
+        flush_interval boundary is reached.
+        
+        Notes
+        -----
+        This method is typically called internally after each write operation.
+        """
+        self.counter.increment()
+        if self.counter.is_flush_timing(flush_interval=self.flush_interval):
+            self.flush()
+
+    def items(self) -> Iterator[tuple[str, Any]]:
+        """Iterate over key-value pairs in the current group.
+
+        Group values are wrapped as HDF5Container objects and dataset values
+        are returned as decoded Python objects.
+        """
+        for key, value in self.data.items():
+            if isinstance(value, h5py.Group):
+                container = self.__class__(
+                    data=value,
+                    flush_interval=self.flush_interval,
+                    counter=self.counter
+                )
+                yield key, container
+            elif isinstance(value, h5py.Dataset):
+                yield key, self.get(name=key)
+            else:
+                yield key, value
+
+    def values(self) -> Iterator[Any]:
+        """Iterate over values in the current group.
+
+        Group values are wrapped as HDF5Container objects and dataset values
+        are returned as decoded Python objects.
+
+        Returns
+        -------
+        Iterator[Any]
+            Iterator of group wrappers or decoded dataset values.
+        """
+        for value in self.data.values():
+            if isinstance(value, h5py.Group):
+                container = self.__class__(
+                    data=value,
+                    flush_interval=self.flush_interval,
+                    counter=self.counter
+                )
+                yield container
+            elif isinstance(value, h5py.Dataset):
+                output = value[()]
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8")
+                if isinstance(output, np.ndarray) and output.dtype.kind in {"S", "U"}:
+                    output = output.astype(np.str_)
+                yield output
+            else:
+                yield value
+
+    def keys(self) -> Iterator[str]:
+        """Iterate over keys in the current group."""
+        return iter(self.data.keys())
