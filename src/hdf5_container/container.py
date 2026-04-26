@@ -6,24 +6,9 @@ from typing import Any, Iterator
 from dataclasses import dataclass, field
 
 from .mixin import IOMixin, SpecialMethodsMixin
+from .utils.counter import FlushCounter
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class FlushCounter:
-    """Shared mutable counter for periodic flushing across subcontainers."""
-
-    value: int = 0
-
-    def increment(self) -> int:
-        """Increment the counter and return the updated value."""
-        self.value += 1
-        return self.value
-
-    def is_flush_timing(self, flush_interval: int) -> bool:
-        """Return whether current counter reached the flush boundary."""
-        return self.value % flush_interval == 0
 
 
 @dataclass
@@ -298,5 +283,12 @@ class HDF5Container(IOMixin, SpecialMethodsMixin):
                 yield value
 
     def keys(self) -> Iterator[str]:
-        """Iterate over keys in the current group."""
+        """
+        Iterate over keys in the current group.
+
+        Returns
+        -------
+        Iterator[str]
+            Key iterator for datasets/groups under the current node.
+        """
         return iter(self.data.keys())
